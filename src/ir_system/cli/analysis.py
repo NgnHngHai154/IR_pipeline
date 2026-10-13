@@ -131,6 +131,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
     if args.reranker:
+        from ir_system.models._jina_reranker_v3_adapter import is_jina_v3
+        if is_jina_v3(args.reranker):
+            parser.error("Jina v3 uses listwise candidate scoring. Use ir_system.cli.main "
+                         "--retriever listwise-reranker --candidate-top-k 100 for retrieval metrics; "
+                         "full-corpus alignment/margin analysis is not supported for this model.")
         if args.model and args.model != _RERANK_EMBEDDING_MODEL:
             logging.info("Using %s for reranking-stage embeddings instead of %s",
                          _RERANK_EMBEDDING_MODEL, args.model)
