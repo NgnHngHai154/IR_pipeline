@@ -197,6 +197,16 @@ def _build_retriever(
             scoring_device=None if colbert_scoring_device == "auto" else colbert_scoring_device,
             verify_scores=colbert_verify_scores)
 
+    elif rtype == "listwise-reranker":
+        from ir_system.models.listwise_reranker import ListwiseRerankerModel
+        from ir_system.retrievers.listwise_reranker import ListwiseRerankerRetriever
+        if not isinstance(model, ListwiseRerankerModel):
+            raise ValueError("--retriever listwise-reranker requires --model-type listwise-reranker.")
+        stage1 = _build_candidate_retriever(
+            candidate_retriever_type, candidate_model, candidate_batch_size,
+        )
+        return ListwiseRerankerRetriever(model, stage1, candidate_top_k)
+
     elif rtype in ("cross-encoder", "cross_encoder", "reranker"):
         if not isinstance(model, CrossEncoderModel):
             raise ValueError(
@@ -235,7 +245,7 @@ def _build_retriever(
     else:
         raise ValueError(
             f"Unknown retriever type: {retriever_type!r}. "
-            "Supported: bm25, dense, late-interaction, cross-encoder, hybrid"
+            "Supported: bm25, dense, late-interaction, cross-encoder, listwise-reranker, hybrid"
         )
 
 
@@ -388,7 +398,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retriever",
         required=True,
-        choices=["bm25", "dense", "late-interaction", "cross-encoder", "hybrid"],
+        choices=["bm25", "dense", "late-interaction", "cross-encoder", "listwise-reranker", "hybrid"],
         help="Retriever type.",
     )
     parser.add_argument(
@@ -457,7 +467,7 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-type",
-        choices=["single-vector", "multi-vector", "cross-encoder"],
+        choices=["single-vector", "multi-vector", "cross-encoder", "listwise-reranker"],
         default=None,
         help="Override model type detection.",
     )
@@ -473,6 +483,8 @@ def _make_parser() -> argparse.ArgumentParser:
         default=32,
         help="Encoding/scoring batch size (default: 32).",
     )
+    parser.add_argument("--jina-revision", default=None,
+                        help="Jina v3 HF revision; defaults to a pinned commit. Only for listwise-reranker.")
     parser.add_argument("--colbert-score-batch-size", type=int, default=128,
                         help="Documents per exhaustive MaxSim GPU block (default: 128).")
     parser.add_argument("--colbert-query-batch-size", type=int, default=8,
@@ -491,7 +503,7 @@ def _make_parser() -> argparse.ArgumentParser:
         "--candidate-retriever",
         choices=["bm25", "dense"],
         default="bm25",
-        help="First-stage retriever for cross-encoder reranking (default: bm25).",
+        help="First-stage retriever for cross-encoder/listwise reranking (default: bm25).",
     )
     parser.add_argument(
         "--candidate-model",
@@ -628,9 +640,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     # --- Validate candidate-retriever usage ---
-    is_cross_encoder = args.retriever in ("cross-encoder", "cross_encoder", "reranker")
+    is_cross_encoder = args.retriever in ("cross-encoder", "cross_encoder", "reranker", "listwise-reranker")
+    if args.retriever == "listwise-reranker" and args.candidate_top_k <= 0:
+        logger.error("--candidate-top-k must be positive for listwise reranking.")
+        return 1
+    if args.jina_revision and args.retriever != "listwise-reranker":
+        logger.error("--jina-revision is only supported with --retriever listwise-reranker.")
+        return 1
     if not is_cross_encoder and args.candidate_model:
-        logger.warning("--candidate-model is ignored when --retriever is not cross-encoder.")
+        logger.warning("--candidate-model is ignored when --retriever is not a reranker.")
     if is_cross_encoder and args.candidate_retriever == "dense" and not args.candidate_model:
         logger.error("--candidate-model is required when --candidate-retriever=dense.")
         return 1
@@ -716,6 +734,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 batch_size=args.batch_size,
                 query_prompt=args.query_prefix,
                 document_prompt=args.doc_prefix,
+                **({"jina_revision": args.jina_revision} if args.retriever == "listwise-reranker" else {}),
             )
         except (ImportError, ValueError, RuntimeError) as exc:
             logger.error("Model loading failed: %s", exc)
@@ -880,6 +899,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "dataset": str(args.dataset),
         "timestamp": timestamp,
     }
+
+    if args.retriever == "listwise-reranker":
+        config["listwise_inference"] = model.inference_config
 
     # --- Save combined results ---
     # Save aggregate metrics summary + one sub-dir per pair

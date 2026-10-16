@@ -26,12 +26,13 @@ import logging
 from typing import Literal, Optional, Union
 
 from ir_system.models.cross_encoder import CrossEncoderModel
+from ir_system.models.listwise_reranker import ListwiseRerankerModel
 from ir_system.models.single_vector import SingleVectorEmbeddingModel
 from ir_system.models.multi_vector import MultiVectorEmbeddingModel
 
 logger = logging.getLogger(__name__)
 
-ModelType = Literal["single-vector", "multi-vector", "cross-encoder"]
+ModelType = Literal["single-vector", "multi-vector", "cross-encoder", "listwise-reranker"]
 
 # Prefix heuristics — can be extended without changing retrievers or pipeline.
 _CROSS_ENCODER_PREFIXES = (
@@ -49,6 +50,7 @@ AnyModel = Union[
     SingleVectorEmbeddingModel,
     MultiVectorEmbeddingModel,
     CrossEncoderModel,
+    ListwiseRerankerModel,
     None,
 ]
 
@@ -60,6 +62,7 @@ def create_model(
     batch_size: int = 32,
     query_prompt: Optional[str] = None,
     document_prompt: Optional[str] = None,
+    jina_revision: Optional[str] = None,
 ) -> AnyModel:
     """
     Instantiate a model from its identifier.
@@ -95,6 +98,9 @@ def create_model(
         raise ValueError("ModelFactory: model_id must be non-empty.")
 
     normalized = model_id.strip()
+    from ir_system.models._jina_reranker_v3_adapter import is_jina_v3
+    if is_jina_v3(normalized) and model_type not in (None, "listwise-reranker"):
+        raise ValueError("Jina v3 requires --model-type listwise-reranker and --retriever listwise-reranker.")
 
     # BM25 needs no neural model.
     if normalized.lower() == "bm25":
@@ -119,10 +125,13 @@ def create_model(
         return _build_multi_vector(normalized, resolved_device, batch_size)
     elif resolved_type == "cross-encoder":
         return _build_cross_encoder(normalized, resolved_device, batch_size)
+    elif resolved_type == "listwise-reranker":
+        from ir_system.models._jina_reranker_v3_adapter import JinaRerankerV3Adapter
+        return JinaRerankerV3Adapter(normalized, resolved_device, revision=jina_revision)
     else:
         raise ValueError(
             f"ModelFactory: unsupported model type {resolved_type!r}. "
-            "Expected one of: single-vector, multi-vector, cross-encoder."
+            "Expected one of: single-vector, multi-vector, cross-encoder, listwise-reranker."
         )
 
 
@@ -150,6 +159,9 @@ def _resolve_device(device: str) -> str:
 def _infer_model_type(model_id: str) -> ModelType:
     """Heuristically infer model type from model identifier."""
     lower = model_id.lower()
+    from ir_system.models._jina_reranker_v3_adapter import is_jina_v3
+    if is_jina_v3(model_id):
+        return "listwise-reranker"
 
     for prefix in _CROSS_ENCODER_PREFIXES:
         if lower.startswith(prefix) or prefix.rstrip("/") in lower:

@@ -16,6 +16,11 @@ dependencies = [
 
 
 [project.optional-dependencies]
+# Separate environment: do not combine with the ColBERT extras.
+jina-v3 = [
+    "transformers>=4.56,<5",
+    "torch>=2.2",
+]
 dense = [
     "faiss-cpu>=1.7",
     "sentence-transformers>=3.0",

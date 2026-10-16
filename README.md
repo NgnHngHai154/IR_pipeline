@@ -136,6 +136,88 @@ python -m ir_system.cli.main \
     --metrics ndcg@10 mrr@10
 ```
 
+### Jina reranker v3 (native listwise, two stages)
+
+Use a **separate Python environment** so the working ColBERT/cross-encoder
+environment is unchanged. From the `ir_system` directory:
+
+```powershell
+python -m venv .venv-jina
+.\.venv-jina\Scripts\python.exe -m pip install -e ".[jina-v3]"
+.\.venv-jina\Scripts\python.exe -m ir_system.cli.main `
+    --dataset data/toy-ml `
+    --model jinaai/jina-reranker-v3 `
+    --retriever listwise-reranker `
+    --candidate-retriever bm25 `
+    --candidate-top-k 100 `
+    --top-k 10 `
+    --queries all --documents all `
+    --device auto `
+    --metrics ndcg@10 mrr@10 recall@10 `
+    --name jina_v3_toy
+```
+
+For CUDA, install the PyTorch build appropriate to your CUDA environment in
+this new environment, then use `--device cuda`. First use downloads the model.
+For dense candidates, install `".[jina-v3,dense]"` in this environment and add
+`--candidate-retriever dense --candidate-model intfloat/multilingual-e5-small`.
+Dense FAISS index loading/saving works as in existing two-stage retrieval.
+Do not combine `[jina-v3]` with `[all]` or `[late-interaction]`.
+
+The new model type is inferred for the exact ID `jinaai/jina-reranker-v3`.
+For a local Jina v3 snapshot, add `--model-type listwise-reranker`.
+Use `--retriever listwise-reranker`, not `cross-encoder`; other model IDs retain
+their previous routing and the existing cross-encoder adapter is unchanged.
+
+Stage 1 supplies up to 100 candidates by default (fewer for smaller corpora).
+Their original order is passed to **one native `model.rerank()` call per query**.
+The Hugging Face implementation owns prompt formatting, token truncation,
+internal blocks, cross-block query aggregation and cosine scoring. We preserve
+its defaults (query: 512 tokens; document: 2048 tokens at the pinned revision).
+`--batch-size` does not split the Jina list; `--candidate-batch-size` controls
+dense candidate encoding. Context memory can be substantial even for a 0.6B
+model; on OOM, explicitly reduce `--candidate-top-k`. There is no silent retry
+with changed candidates or independently scored blocks.
+
+Model and tokenizer use the same pinned Hugging Face revision
+`10fb694fc21f7a710a563ff1eb977a460f3868e4`, with `trust_remote_code=True`,
+`dtype="auto"`, and evaluation mode. `--jina-revision COMMIT` explicitly
+overrides the revision. No projector/config architecture is reimplemented.
+The adapter installs the matching tokenizer into the native model because its
+lazy tokenizer loader otherwise ignores the model revision. The run's
+`config.json` includes revision and dtype under `listwise_inference`.
+
+Native result indices map scores back to candidates, including duplicate text
+under different document IDs. Final ordering remains descending score, then
+ascending document ID. Scores are not normalized, fused with stage-1 scores,
+or interpreted as probabilities. Existing NDCG/MRR/Recall metrics and result
+formats are reused. Metrics use only returned top-k results: to measure
+Recall@100, also request `--top-k 100`. Reranking cannot recover documents
+missing from stage 1; compare models using the same candidate settings.
+
+The language-analysis CLI's `--reranker` remains a **pairwise full-corpus**
+alignment/margin workflow. It rejects Jina v3 with an actionable error rather
+than silently changing that analysis. Use the main CLI above for Jina's
+multilingual retrieval evaluation (VI/EN/CSW queries against VI/EN documents).
+
+For CQA, assemble its parts first, from `ir_system`:
+`python data/exports/cqa/prepare.py`, then use `--dataset data/exports/cqa`.
+
+Offline regression tests use a fake native model and need no model download:
+`python -m pytest tests/test_jina_reranker_v3.py -q`.
+To additionally check the real checkpoint against native inference, install
+pytest in the Jina environment and run:
+
+```powershell
+$env:IR_TEST_JINA_V3 = "1"
+$env:IR_JINA_DEVICE = "cpu" # or cuda
+python -m pytest tests/test_jina_reranker_v3.py -k real_checkpoint -q
+```
+
+References: [model card](https://huggingface.co/jinaai/jina-reranker-v3),
+[pinned inference code](https://huggingface.co/jinaai/jina-reranker-v3/blob/10fb694fc21f7a710a563ff1eb977a460f3868e4/modeling.py).
+The model weights are published under CC BY-NC 4.0.
+
 ### Mandatory FAISS Index Storage and Search
 
 Dense retrieval always builds and saves a FAISS `IndexFlatIP`, then searches it
